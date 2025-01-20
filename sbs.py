@@ -41,62 +41,66 @@ class SideBySide:
         - sbs_image: the stereoscopic image.
         """
 
-        # Ensure base_image and depth_map are on CPU and convert to NumPy
-        image_np = base_image.squeeze(0).cpu().numpy()  # H x W x C
-        # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
-        depth_map_np = depth_map.squeeze(0).squeeze(0).cpu().numpy().mean(2)    # H x W
+        batch_size, height, width, channels = base_image.shape
+        out_tensors = base_image.clone()
+        for i, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
+            # Ensure base_image and depth_map are on CPU and convert to NumPy
+            image_np = base_image.cpu().numpy()  # H x W x C
+            # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
+            depth_map_np = depth_map.squeeze(0).cpu().numpy().mean(2)    # H x W
 
-        # Normalize images if necessary
-        if image_np.dtype != np.uint8:
-            image_np = (image_np * 255).astype(np.uint8)
-        if depth_map_np.dtype != np.uint8:
-            depth_map_np = (depth_map_np * 255).astype(np.uint8)
+            # Normalize images if necessary
+            if image_np.dtype != np.uint8:
+                image_np = (image_np * 255).astype(np.uint8)
+            if depth_map_np.dtype != np.uint8:
+                depth_map_np = (depth_map_np * 255).astype(np.uint8)
 
-        height, width, _ = image_np.shape
+            height, width, _ = image_np.shape
 
-        # Resize depth map to match base image using NumPy (nearest-neighbor)
-        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+            # Resize depth map to match base image using NumPy (nearest-neighbor)
+            depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
 
-        # Determine flip offset based on mode
-        flip_offset = width if mode == "Cross-eyed" else 0
+            # Determine flip offset based on mode
+            flip_offset = width if mode == "Cross-eyed" else 0
 
-        # Initialize SBS image by duplicating the base image side by side
-        sbs_image = np.tile(image_np, (1, 2, 1))  # H x (2W) x C
+            # Initialize SBS image by duplicating the base image side by side
+            sbs_image = np.tile(image_np, (1, 2, 1))  # H x (2W) x C
 
-        # Calculate pixel shifts
-        depth_scaling = depth_scale / width
-        pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+            # Calculate pixel shifts
+            depth_scaling = depth_scale / width
+            pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
 
-        # Create coordinate grids
-        y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+            # Create coordinate grids
+            y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
 
-        # Calculate new x coordinates with shift
-        new_x = x_coords + pixel_shift
+            # Calculate new x coordinates with shift
+            new_x = x_coords + pixel_shift
 
-        # Clamp new_x to [0, width-1]
-        new_x = np.clip(new_x, 0, width - 1)
+            # Clamp new_x to [0, width-1]
+            new_x = np.clip(new_x, 0, width - 1)
 
-        # Flatten arrays for efficient processing
-        flat_y = y_coords.flatten()
-        flat_x = x_coords.flatten()
-        flat_new_x = new_x.flatten()
+            # Flatten arrays for efficient processing
+            flat_y = y_coords.flatten()
+            flat_x = x_coords.flatten()
+            flat_new_x = new_x.flatten()
 
-        # Calculate target positions in SBS image
-        if mode == "Parallel":
-            target_x = flat_new_x
-        else:
-            target_x = flat_new_x + width  # Shift to the other half
+            # Calculate target positions in SBS image
+            if mode == "Parallel":
+                target_x = flat_new_x
+            else:
+                target_x = flat_new_x + width  # Shift to the other half
 
-        # Ensure target_x does not exceed SBS image boundaries
-        target_x = np.clip(target_x, 0, 2 * width - 1)
+            # Ensure target_x does not exceed SBS image boundaries
+            target_x = np.clip(target_x, 0, 2 * width - 1)
 
-        # Assign colors to the SBS image at shifted positions
-        sbs_image[flat_y, target_x] = image_np[flat_y, flat_x]
+            # Assign colors to the SBS image at shifted positions
+            sbs_image[flat_y, target_x] = image_np[flat_y, flat_x]
 
-        # Convert back to torch tensor
-        sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
+            # Convert back to torch tensor
+            sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0)  # 1 x C x H x (2W)
+            out_tensors[i, :, :, :] = sbs_image_tensor
 
-        return sbs_image_tensor
+        return out_tensors.unsqueeze(0)
     
 class ShiftedImage:
     def __init__(self):
@@ -122,58 +126,112 @@ class ShiftedImage:
         Shift the base image using a depth map and return the shifted image.
 
         Parameters:
-        - base_image: PyTorch tensor representing the base image.
-        - depth_map: PyTorch tensor representing the depth map.
+        - base_image: PyTorch tensor of shape (1, C, H, W)
+        - depth_map: PyTorch tensor of shape (1, 1, H, W)
         - depth_scale: Integer representing the scaling factor for depth.
-        - mode: "Left" or "Right" to select the shifted image direction.
+        - mode: "Left", "Right", or "Cross-eyed" to select the shifted image direction.
 
         Returns:
-        - shifted_image_tensor: The shifted image as a PyTorch tensor.
+        - shifted_image_tensor: The shifted image as a PyTorch tensor of shape (1, C, H, 2W)
         """
+        # Remove batch dimensions
+        # image = base_image.squeeze(0)          # Shape: (C, H, W)
+        # depth = depth_map.squeeze(0).squeeze(0)  # Shape: (H, W)
 
-        # Ensure base_image and depth_map are on CPU and convert to NumPy
-        image_np = base_image.squeeze(0).cpu().numpy()  # H x W x C
-        # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
-        depth_map_np = depth_map.squeeze(0).squeeze(0).cpu().numpy().mean(2)    # H x W
+        batch_size, height, width, channels = base_image.shape
+        out_tensors = base_image.clone()
+        for i, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
+            # Ensure base_image and depth_map are on CPU and convert to NumPy
+            image_np = base_image.cpu().numpy()  # H x W x C
+            # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
+            depth_map_np = depth_map.squeeze(0).cpu().numpy().mean(2)    # H x W
 
-        # Normalize images if necessary
-        if image_np.dtype != np.uint8:
-            image_np = (image_np * 255).astype(np.uint8)
-        if depth_map_np.dtype != np.uint8:
-            depth_map_np = (depth_map_np * 255).astype(np.uint8)
+            # Normalize images if necessary
+            if image_np.dtype != np.uint8:
+                image_np = (image_np * 255).astype(np.uint8)
+            if depth_map_np.dtype != np.uint8:
+                depth_map_np = (depth_map_np * 255).astype(np.uint8)
 
-        height, width, _ = image_np.shape
+            height, width, _ = image_np.shape
 
-        # Resize depth map to match base image using NumPy (nearest-neighbor)
-        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+            # Resize depth map to match base image using NumPy (nearest-neighbor)
+            depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
 
-        # Determine flip offset based on mode
-        flip_offset = width if mode == "Cross-eyed" else 0
+            # Determine flip offset based on mode
+            flip_offset = width if mode == "Cross-eyed" else 0
 
-        # Calculate pixel shifts
-        depth_scaling = depth_scale / width
-        pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+            # Calculate pixel shifts
+            depth_scaling = depth_scale / width
+            pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+
+            # Create coordinate grids
+            y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+
+            # Calculate new x coordinates with shift
+            new_x = x_coords + pixel_shift
+
+            # Clamp new_x to [0, width-1]
+            new_x = np.clip(new_x, 0, width - 1)
+            sbs_image = np.tile(image_np, (1, 1, 1))  # H x (2W) x C
+            flat_y = y_coords.flatten()
+            flat_x = x_coords.flatten()
+            flat_new_x = new_x.flatten()
+
+            sbs_image[flat_y, flat_new_x] = image_np[flat_y, flat_x]
+
+            # Convert back to torch tensor
+            sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0)#.unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
+            out_tensors[i, :, :, :] = sbs_image_tensor
+
+        return out_tensors.unsqueeze(0)
+    
+        batch_size, H, W, C = base_image.shape
+        depth = depth_map.mean(3)
+
+        # # If depth_map has more channels, average them
+        # if depth.ndim > 2:
+        #     depth = depth.mean(dim=0)  # Shape: (H, W)
+
+        # Normalize depth_map if necessary (assuming depth is already normalized between 0 and 1)
+        # If depth is not normalized, uncomment the following line:
+        # depth = (depth - depth.min()) / (depth.max() - depth.min())
+
+        # Calculate pixel shifts based on depth_map and depth_scale
+        depth_scaling = depth_scale / W
+        pixel_shift = (depth * depth_scaling).floor().to(torch.int32)  # Shape: (H, W)
 
         # Create coordinate grids
-        y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+        y_coords = torch.arange(H, device=base_image.device).view(H, 1).expand(H, W)  # Shape: (H, W)
+        x_coords = torch.arange(W, device=base_image.device).view(1, W).expand(H, W)  # Shape: (H, W)
 
         # Calculate new x coordinates with shift
-        new_x = x_coords + pixel_shift
+        new_x = x_coords + pixel_shift  # Shape: (H, W)
 
-        # Clamp new_x to [0, width-1]
-        new_x = np.clip(new_x, 0, width - 1)
-        sbs_image = np.tile(image_np, (1, 1, 1))  # H x (2W) x C
-        flat_y = y_coords.flatten()
-        flat_x = x_coords.flatten()
-        flat_new_x = new_x.flatten()
+        # Clamp new_x to ensure indices are within image boundaries
+        new_x = torch.clamp(new_x, 0, W - 1)  # Shape: (H, W)
 
-        sbs_image[flat_y, flat_new_x] = image_np[flat_y, flat_x]
+        # Initialize the side-by-side (sbs) image with double the width
+        sbs_image = torch.zeros(C, H, 2 * W, device=image.device)
 
-        # Convert back to torch tensor
-        sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
+        # Assign the original image to the left half of the sbs_image
+        sbs_image[:, :, :W] = image
 
-        return sbs_image_tensor
-    
+        # Prepare for assigning the shifted image to the right half
+        # Expand new_x to match the number of channels
+        new_x_expanded = new_x.unsqueeze(0).expand(C, H, W)  # Shape: (C, H, W)
+
+        # Assign the pixels from the original image to the shifted positions in the right half
+        # Using scatter to map pixel values based on new_x coordinates
+        sbs_image[:, :, W:] = sbs_image[:, :, W:].scatter(2, new_x_expanded, image)
+
+        # If mode is "Cross-eyed", flip the shifted image horizontally
+        if mode.lower() == "cross-eyed":
+            sbs_image[:, :, W:] = torch.flip(sbs_image[:, :, W:], dims=[2])
+
+        # Add a batch dimension
+        shifted_image_tensor = sbs_image.unsqueeze(0)  # Shape: (1, C, H, 2W)
+
+        return shifted_image_tensor
 
 class PairImages:
     def __init__(self):
@@ -211,12 +269,12 @@ class PairImages:
                 f"Found left: {left_image.shape}, right: {right_image.shape}."
             )
 
-        # Ensure images are in the expected format (Batch, Channels, H, W)
-        if left_image.ndim != 4 or right_image.ndim != 4:
-            raise ValueError(
-                f"Images must have 4 dimensions (Batch, Channels, H, W). "
-                f"Found left: {left_image.ndim}D, right: {right_image.ndim}D."
-            )
+        # # Ensure images are in the expected format (Batch, Channels, H, W)
+        # if left_image.ndim != 4 or right_image.ndim != 4:
+        #     raise ValueError(
+        #         f"Images must have 4 dimensions (Batch, Channels, H, W). "
+        #         f"Found left: {left_image.ndim}D, right: {right_image.ndim}D."
+        #     )
 
         # Check if both images are on the same device
         if left_image.device != right_image.device:
@@ -230,7 +288,13 @@ class PairImages:
         # lshaped = self._reshape(left_image)
         # rshaped = self._reshape(right_image)
         # sbs_image = torch.cat((lshaped, rshaped), dim=0)  # Concatenate along width (W)
-        sbs_image = torch.cat((left_image, right_image), dim=2).unsqueeze(0)  # Concatenate along width (W)
+        if left_image.ndim == 4 or right_image.ndim == 4:
+
+            sbs_image = torch.cat((left_image, right_image), dim=2).unsqueeze(0)  # Concatenate along width (W)
+
+        elif left_image.ndim == 3 or right_image.ndim == 3:
+
+            sbs_image = torch.cat((left_image, right_image), dim=1).unsqueeze(0)  # Concatenate along width (W)
 
         return sbs_image
 
