@@ -1,9 +1,11 @@
 
 
-from .sbs import SideBySide
+from .sbs import SideBySide, ShiftedImage, PairImages
 
 NODE_CLASS_MAPPINGS = {
-    "SBS_by_SamSeen": SideBySide
+    "SBS_by_SamSeen": SideBySide,
+    "Shifted_By_Rob": ShiftedImage,
+    "PairImages_By_Rob": PairImages,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
