@@ -131,111 +131,49 @@ class ShiftedImage:
         - shifted_image_tensor: The shifted image as a PyTorch tensor.
         """
 
-        # Determine the device from base_image; assume depth_map is on the same device
-        device = base_image.device
+        # Ensure base_image and depth_map are on CPU and convert to NumPy
+        image_np = base_image.squeeze(0).cpu().numpy()  # H x W x C
+        # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
+        depth_map_np = depth_map.squeeze(0).squeeze(0).cpu().numpy().mean(2)    # H x W
 
-        # Validate mode
-        if mode not in ["Parallel", "Cross-eyed"]:
-            raise ValueError(f"Invalid mode '{mode}'. Choose 'Parallel' or 'Cross-eyed'.")
+        # Normalize images if necessary
+        if image_np.dtype != np.uint8:
+            image_np = (image_np * 255).astype(np.uint8)
+        if depth_map_np.dtype != np.uint8:
+            depth_map_np = (depth_map_np * 255).astype(np.uint8)
 
+        height, width, _ = image_np.shape
 
-        # Preprocess base_image
-        if base_image.ndim != 4:
-            raise ValueError(
-                f"Base image must have 4 dimensions (Batch, Channels, H, W) or (Batch, H, W, Channels). "
-                f"Found shape {base_image.shape}"
-            )
+        # Resize depth map to match base image using NumPy (nearest-neighbor)
+        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
 
-        # Determine if channels are first or last
-        if base_image.shape[1] == 3:
-            # Channels first: (Batch, 3, H, W) -> (H, W, C)
-            image = base_image.squeeze(0).permute(1, 2, 0)
-        elif base_image.shape[3] == 3:
-            # Channels last: (Batch, H, W, 3) -> (H, W, C)
-            image = base_image.squeeze(0)
-        else:
-            raise ValueError(
-                f"Base image must have 3 channels. Found {base_image.shape[1]} or {base_image.shape[3]} channels."
-            )
+        # Determine flip offset based on mode
+        flip_offset = width if mode == "Cross-eyed" else 0
 
-        # Ensure image is in [0, 255] and uint8
-        image_uint8 = torch.clamp(image * 255.0, 0, 255).to(torch.uint8).to(device)
+        # Calculate pixel shifts
+        depth_scaling = depth_scale / width
+        pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
 
-        # Preprocess depth_map
-        if depth_map.ndim != 4:
-            raise ValueError(
-                f"Depth map must have 4 dimensions (Batch, Channels, H, W) or (Batch, H, W, Channels). "
-                f"Found shape {depth_map.shape}"
-            )
+        # Create coordinate grids
+        y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
 
-        if depth_map.shape[1] == 1:
-            # Shape: (Batch, 1, H, W) -> (H, W)
-            depth = depth_map.squeeze(0).squeeze(0)
-        elif depth_map.shape[3] == 1:
-            # Shape: (Batch, H, W, 1) -> (H, W)
-            depth = depth_map.squeeze(0).squeeze(3)
-        elif depth_map.shape[1] > 1:
-            # Shape: (Batch, C, H, W), C > 1 -> average across channels
-            # depth = depth_map.squeeze(0).mean(dim=0)
-            depth = depth_map.squeeze(0).mean(2)
-        elif depth_map.shape[3] > 1:
-            # Shape: (Batch, H, W, C), C > 1 -> average across channels
-            depth = depth_map.squeeze(0).mean(dim=-1)
-        else:
-            raise ValueError(
-                f"Depth map must have 1 channel. Found {depth_map.shape[1]} or {depth_map.shape[3]} channels."
-            )
+        # Calculate new x coordinates with shift
+        new_x = x_coords + pixel_shift
 
-        # Normalize depth_map to [0,1]
-        depth_normalized = torch.clamp(depth, 0.0, 1.0).to(device)
+        # Clamp new_x to [0, width-1]
+        new_x = np.clip(new_x, 0, width - 1)
+        sbs_image = np.tile(image_np, (1, 1, 1))  # H x (2W) x C
+        flat_y = y_coords.flatten()
+        flat_x = x_coords.flatten()
+        flat_new_x = new_x.flatten()
 
-        # Resize depth_map to match base_image dimensions if necessary
-        H, W, _ = image_uint8.shape
-        if depth_normalized.shape != (H, W):
-            depth_normalized = F.interpolate(
-                depth_normalized.unsqueeze(0).unsqueeze(0),
-                size=(H, W),
-                mode='nearest'
-            ).squeeze(0).squeeze(0)
+        sbs_image[flat_y, flat_new_x] = image_np[flat_y, flat_x]
 
-        # Compute shift amounts
-        shift_map = (depth_normalized * depth_scale).long().to(device)  # (H, W)
+        # Convert back to torch tensor
+        sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
 
-        # Generate grid of indices
-        y_indices, x_indices = torch.meshgrid(
-            torch.arange(H, device=device),
-            torch.arange(W, device=device),
-            indexing='ij'
-        )  # Both (H, W)
-
-
-        # Compute shifted indices based on mode
-        if mode == "Parallel":
-            # Left view: shift right
-            shifted_x = x_indices + shift_map
-            # Right view: shift left
-        else:  # Cross-eyed
-            # Left view: shift left
-            shifted_x = x_indices - shift_map
-            # Right view: shift right
-
-        # Clamp shifted indices to valid range [0, W-1]
-        shifted_x = torch.clamp(shifted_x, 0, W - 1)
-
-        # Ensure indices are of type Long for indexing
-        shifted_x = shifted_x.long()
-
-        # Create the shifted view by indexing
-        shifted_view = image_uint8[y_indices, shifted_x, :]  # (H, W, C)
-
-        # Convert to float tensor and normalize to [0,1]
-        shifted_image_tensor = shifted_view.float() / 255.0  # (H, W, C)
-
-        # Permute to (C, H, W) and add batch dimension
-        shifted_image_tensor = shifted_image_tensor.unsqueeze(0).unsqueeze(0)  # (1, C, H, W)
-
-        return shifted_image_tensor
-
+        return sbs_image_tensor
+    
 
 class PairImages:
     def __init__(self):
