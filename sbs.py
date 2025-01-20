@@ -26,9 +26,8 @@ class SideBySide:
     CATEGORY = "👀 SamSeen"
 
     def SideBySide(self, base_image, depth_map, depth_scale, mode="Cross-eyed"):
-
         """
-        Create a side-by-side (SBS) stereoscopic image from a standard image and a depth map.
+      Create a side-by-side (SBS) stereoscopic image from a standard image and a depth map.
 
         Parameters:
         - base_image: numpy array representing the base image.
@@ -42,13 +41,103 @@ class SideBySide:
         - sbs_image: the stereoscopic image.
         """
 
-            
+        # Ensure base_image and depth_map are on CPU and convert to NumPy
+        image_np = base_image.squeeze(0).cpu().numpy()  # H x W x C
+        # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
+        depth_map_np = depth_map.squeeze(0).squeeze(0).cpu().numpy().mean(2)    # H x W
+
+        # Normalize images if necessary
+        if image_np.dtype != np.uint8:
+            image_np = (image_np * 255).astype(np.uint8)
+        if depth_map_np.dtype != np.uint8:
+            depth_map_np = (depth_map_np * 255).astype(np.uint8)
+
+        height, width, _ = image_np.shape
+
+        # Resize depth map to match base image using NumPy (nearest-neighbor)
+        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+
+        # Determine flip offset based on mode
+        flip_offset = width if mode == "Cross-eyed" else 0
+
+        # Initialize SBS image by duplicating the base image side by side
+        sbs_image = np.tile(image_np, (1, 2, 1))  # H x (2W) x C
+
+        # Calculate pixel shifts
+        depth_scaling = depth_scale / width
+        pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+
+        # Create coordinate grids
+        y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+
+        # Calculate new x coordinates with shift
+        new_x = x_coords + pixel_shift
+
+        # Clamp new_x to [0, width-1]
+        new_x = np.clip(new_x, 0, width - 1)
+
+        # Flatten arrays for efficient processing
+        flat_y = y_coords.flatten()
+        flat_x = x_coords.flatten()
+        flat_new_x = new_x.flatten()
+
+        # Calculate target positions in SBS image
+        if mode == "Parallel":
+            target_x = flat_new_x
+        else:
+            target_x = flat_new_x + width  # Shift to the other half
+
+        # Ensure target_x does not exceed SBS image boundaries
+        target_x = np.clip(target_x, 0, 2 * width - 1)
+
+        # Assign colors to the SBS image at shifted positions
+        sbs_image[flat_y, target_x] = image_np[flat_y, flat_x]
+
+        # Convert back to torch tensor
+        sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
+
+        return sbs_image_tensor
+    
+class ShiftedImage:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_image": ("IMAGE",),
+                "depth_map": ("IMAGE",),
+                "depth_scale": ("INT", {"default": 50}),
+                "mode": (["Parallel", "Cross-eyed"], {}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "ShiftedImage"
+    CATEGORY = "👀 SamSeen"
+
+    def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Left"):
+        """
+        Shift the base image using a depth map and return the shifted image.
+
+        Parameters:
+        - base_image: PyTorch tensor representing the base image.
+        - depth_map: PyTorch tensor representing the depth map.
+        - depth_scale: Integer representing the scaling factor for depth.
+        - mode: "Left" or "Right" to select the shifted image direction.
+
+        Returns:
+        - shifted_image_tensor: The shifted image as a PyTorch tensor.
+        """
+
         # Determine the device from base_image; assume depth_map is on the same device
         device = base_image.device
 
         # Validate mode
         if mode not in ["Parallel", "Cross-eyed"]:
             raise ValueError(f"Invalid mode '{mode}'. Choose 'Parallel' or 'Cross-eyed'.")
+
 
         # Preprocess base_image
         if base_image.ndim != 4:
@@ -70,7 +159,7 @@ class SideBySide:
             )
 
         # Ensure image is in [0, 255] and uint8
-        image_uint8 = torch.clamp(image * 255.0, 0, 255).to(torch.uint8).to(device)  # (H, W, C)
+        image_uint8 = torch.clamp(image * 255.0, 0, 255).to(torch.uint8).to(device)
 
         # Preprocess depth_map
         if depth_map.ndim != 4:
@@ -87,7 +176,8 @@ class SideBySide:
             depth = depth_map.squeeze(0).squeeze(3)
         elif depth_map.shape[1] > 1:
             # Shape: (Batch, C, H, W), C > 1 -> average across channels
-            depth = depth_map.squeeze(0).mean(dim=0)
+            # depth = depth_map.squeeze(0).mean(dim=0)
+            depth = depth_map.squeeze(0).mean(2)
         elif depth_map.shape[3] > 1:
             # Shape: (Batch, H, W, C), C > 1 -> average across channels
             depth = depth_map.squeeze(0).mean(dim=-1)
@@ -102,15 +192,11 @@ class SideBySide:
         # Resize depth_map to match base_image dimensions if necessary
         H, W, _ = image_uint8.shape
         if depth_normalized.shape != (H, W):
-            # Resize using nearest neighbor interpolation
             depth_normalized = F.interpolate(
-                depth_normalized.unsqueeze(0).unsqueeze(0),  # Add batch and channel dimensions
+                depth_normalized.unsqueeze(0).unsqueeze(0),
                 size=(H, W),
                 mode='nearest'
-            ).squeeze(0).squeeze(0)  # Remove batch and channel dimensions
-
-        # Ensure depth_normalized is on the correct device
-        depth_normalized = depth_normalized.to(device)
+            ).squeeze(0).squeeze(0)
 
         # Compute shift amounts
         shift_map = (depth_normalized * depth_scale).long().to(device)  # (H, W)
@@ -122,38 +208,114 @@ class SideBySide:
             indexing='ij'
         )  # Both (H, W)
 
+
         # Compute shifted indices based on mode
         if mode == "Parallel":
             # Left view: shift right
-            left_shifted_x = x_indices + shift_map
+            shifted_x = x_indices + shift_map
             # Right view: shift left
-            right_shifted_x = x_indices - shift_map
         else:  # Cross-eyed
             # Left view: shift left
-            left_shifted_x = x_indices - shift_map
+            shifted_x = x_indices - shift_map
             # Right view: shift right
-            right_shifted_x = x_indices + shift_map
 
         # Clamp shifted indices to valid range [0, W-1]
-        left_shifted_x = torch.clamp(left_shifted_x, 0, W - 1)
-        right_shifted_x = torch.clamp(right_shifted_x, 0, W - 1)
+        shifted_x = torch.clamp(shifted_x, 0, W - 1)
 
         # Ensure indices are of type Long for indexing
-        left_shifted_x = left_shifted_x.long()
-        right_shifted_x = right_shifted_x.long()
+        shifted_x = shifted_x.long()
 
-        # Create left and right views by indexing
-        # image_uint8: (H, W, C), indices: (H, W)
-        left_view = image_uint8[y_indices, left_shifted_x, :]   # (H, W, C)
-        right_view = image_uint8[y_indices, right_shifted_x, :] # (H, W, C)
-
-        # Concatenate left and right views side-by-side
-        sbs_image = torch.cat((left_view, right_view), dim=1)  # (H, W*2, C)
+        # Create the shifted view by indexing
+        shifted_view = image_uint8[y_indices, shifted_x, :]  # (H, W, C)
 
         # Convert to float tensor and normalize to [0,1]
-        sbs_image_tensor = sbs_image.float() / 255.0  # (H, W*2, C)
+        shifted_image_tensor = shifted_view.float() / 255.0  # (H, W, C)
+
+        # Permute to (C, H, W) and add batch dimension
+        shifted_image_tensor = shifted_image_tensor.unsqueeze(0).unsqueeze(0)  # (1, C, H, W)
+
+        return shifted_image_tensor
+
+
+class PairImages:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "left_image": ("IMAGE",),
+                "right_image": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "Pair"
+    CATEGORY = "👀 SamSeen"
+
+    def Pair(self, left_image, right_image):
+        """
+        Create a side-by-side (SBS) image from two images.
+
+        Parameters:
+        - left_image: PyTorch tensor representing the left image.
+        - right_image: PyTorch tensor representing the right image.
+
+        Returns:
+        - sbs_image: The side-by-side image as a PyTorch tensor.
+        """
+
+        # Ensure both images have the same dimensions
+        if left_image.shape != right_image.shape:
+            raise ValueError(
+                f"Left and right images must have the same shape. "
+                f"Found left: {left_image.shape}, right: {right_image.shape}."
+            )
+
+        # Ensure images are in the expected format (Batch, Channels, H, W)
+        if left_image.ndim != 4 or right_image.ndim != 4:
+            raise ValueError(
+                f"Images must have 4 dimensions (Batch, Channels, H, W). "
+                f"Found left: {left_image.ndim}D, right: {right_image.ndim}D."
+            )
+
+        # Check if both images are on the same device
+        if left_image.device != right_image.device:
+            raise ValueError(
+                f"Left and right images must be on the same device. "
+                f"Found left: {left_image.device}, right: {right_image.device}."
+            )
+
+        # Concatenate the images side by side along the width dimension
+        # (Batch, Channels, H, W) -> Concatenate along W
+        # lshaped = self._reshape(left_image)
+        # rshaped = self._reshape(right_image)
+        # sbs_image = torch.cat((lshaped, rshaped), dim=0)  # Concatenate along width (W)
+        sbs_image = torch.cat((left_image, right_image), dim=0).unsqueeze(0)  # Concatenate along width (W)
+
+        return sbs_image
+
+        # Convert to float tensor and normalize to [0,1]
+        # sbs_image = sbs_image.float() / 255.0  # (H, W*2, C)
 
         # Permute to (C, H, W*2) and add batch dimension
-        sbs_image_tensor = sbs_image_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W*2, C)
+        sbs_image = sbs_image.permute(1, 0, 2).unsqueeze(0)  # (1, 1, H, W*2, C)
+        # sbs_image = sbs_image.permute(1, 0, 2).unsqueeze(0)  # (1, 1, H, W*2, C)
 
-        return sbs_image_tensor.to(self.device)
+        return sbs_image
+    
+    def _reshape(self, img):
+        
+        # Determine if channels are first or last
+        if img.shape[1] == 3:
+            # Channels first: (Batch, 3, H, W) -> (H, W, C)
+            return img.squeeze(0).permute(1, 2, 0)
+        elif img.shape[3] == 3:
+            # Channels last: (Batch, H, W, 3) -> (H, W, C)
+            return img.squeeze(0)
+        else:
+            raise ValueError(
+                f"Base image must have 3 channels. Found {base_image.shape[1]} or {base_image.shape[3]} channels."
+            )
+
