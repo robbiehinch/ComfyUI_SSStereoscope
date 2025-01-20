@@ -230,7 +230,7 @@ class PairImages:
         # lshaped = self._reshape(left_image)
         # rshaped = self._reshape(right_image)
         # sbs_image = torch.cat((lshaped, rshaped), dim=0)  # Concatenate along width (W)
-        sbs_image = torch.cat((left_image, right_image), dim=0).unsqueeze(0)  # Concatenate along width (W)
+        sbs_image = torch.cat((left_image, right_image), dim=2).unsqueeze(0)  # Concatenate along width (W)
 
         return sbs_image
 
