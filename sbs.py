@@ -3,7 +3,7 @@ from PIL import Image
 import numpy as np
 import tqdm
 import torch.nn.functional as F
-from scipy.ndimage import zoom
+from scipy.ndimage import zoom,gaussian_filter
 
 from comfy.utils import ProgressBar
 
@@ -218,76 +218,114 @@ class ShiftedImage:
         Returns:
         - sbs_image: the stereoscopic image.
         """
+        device = base_image.device
+        out_tensors = torch.zeros_like(base_image, device=device)
+        for batch, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
 
-        # Convert tensor to numpy array and then to PIL Image
-        image_np = base_image.squeeze(0).cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
-        image_np *= 255
-        image_np = image_np.astype(np.uint8)
-        # image = Image.fromarray((image_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
+            # Convert tensor to numpy array and then to PIL Image
+            # image_np = base_image.cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
+            image_np = base_image.cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
+            # image_np *= 255
+            # image_np = image_np.astype(np.uint8)
+            # image = Image.fromarray((image_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
 
-        depth_map_np = depth_map.squeeze(0).mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
-        depth_map_np *= 255
-        # depth_map_img = Image.fromarray((depth_map_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
+            depth_map_np = depth_map.cpu().numpy()  # Convert from CxHxW to HxWxC
+            # depth_map_np = depth_map.squeeze(0).mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
+            # depth_map_np = depth_map.mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
+            # depth_map_np = depth_map.mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
+            # depth_map_np *= 255
+            # depth_map_img = Image.fromarray((depth_map_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
 
-        # Get dimensions and resize depth map to match base image
-        _, width, height, _ = base_image.shape
-        # depth_map_img = depth_map_img.resize((width, height), Image.NEAREST)
+            # Get dimensions and resize depth map to match base image
+            # _, width, height, _ = base_image.shape
+            width, height, _ = base_image.shape
+            # depth_map_img = depth_map_img.resize((width, height), Image.NEAREST)
 
-        # Calculate the zoom factors for each axis
-        zoom_factors = (
-            width / depth_map.shape[0],  # Height scaling factor
-            height / depth_map.shape[1],  # Width scaling factor
-        )
-        
-        # Use zoom with order=0 for nearest-neighbor interpolation
-        # Resize depth map to match base image using NumPy (nearest-neighbor)
-        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST)).flatten()
-        # depth_map_resized = zoom(depth_map_np, zoom_factors, order=0)
+            # Calculate the zoom factors for each axis
+            zoom_factors = (
+                width / depth_map.shape[0],  # Height scaling factor
+                height / depth_map.shape[1],  # Width scaling factor
+                1,  # colour scaling factor
+            )
 
-        # shifted_image = np.zeros((height, width, 3), dtype=np.uint8)
-        shifted_image = np.copy(image_np)
+            depth_scaling = 255 * depth_scale / width 
+            
+            # Use zoom with order=0 for nearest-neighbor interpolation
+            # Resize depth map to match base image using NumPy (nearest-neighbor)
+            # depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST)).flatten()
+            depth_map_resized = zoom(depth_map_np, zoom_factors, order=0).flatten()
+            depth_map_resized = gaussian_filter(depth_map_resized, sigma=1)
+            depth_map_scaled = depth_map_resized * depth_scaling
+            depth_map_scaled = depth_map_scaled.astype(int)
+            depth_map_scaled *= 3
 
-        # Create an empty image for the side-by-side result
+            # shifted_image = np.zeros((height, width, 3), dtype=np.uint8)
+            shifted_image = np.zeros(image_np.size)
 
-        depth_scaling = depth_scale / width 
-        pbar = ProgressBar(height)
+            # Create an empty image for the side-by-side result
 
-        # Fill the base images 
-        # for y in range(height):
-        #     for x in range(width):
-        #         color = image.getpixel((x, y))
-        #         shifted_image[y, x] = color
+            pbar = ProgressBar(height)
 
-        dpeth_max = depth_map_resized.max()
+            # Fill the base images 
+            # for y in range(height):
+            #     for x in range(width):
+            #         color = image.getpixel((x, y))
+            #         shifted_image[y, x] = color
 
-        # generating the shifted image
-        for y in tqdm.tqdm(range(height)):
-            pbar.update(1)
-            row_start = y * width * 3
-            next_row_start = row_start + width * 3
-            for pixel_index in range(row_start, next_row_start, 3):
-                depth_value = depth_map_resized[int( pixel_index / 3)]
-                pixel_shift = int(depth_value * depth_scaling) * 3
-                
-                new_x = pixel_index + pixel_shift
-                rval = image_np[pixel_index]
-                gval = image_np[pixel_index+1]
-                bval = image_np[pixel_index+2]
-                redraw_end = (pixel_shift + 3) * 3
-                row_end = min(new_x + redraw_end, next_row_start)
-                for i in range(new_x, row_end, 3):
-                    # if new_x + i  >= width or new_x  < 0:
-                    #     break
-                    # new_coords = (y, new_x + i)
-                    shifted_image[i] = rval
-                    shifted_image[i+1] = gval
-                    shifted_image[i+2] = bval
+            dpeth_max = depth_map_resized.max()
+
+            # generating the shifted image
+            full_width = width * 3
+            for row_start in tqdm.tqdm(range(0, height*full_width, full_width)):
+                pbar.update(1)
+                next_row_start = row_start + full_width
+                for pixel_index in range(row_start, next_row_start, 3):
+                    # depth_value = depth_map_scaled[pixel_index]
+                    # pixel_shift = int(depth_value * depth_scaling) * 3
+                    # pixel_shift = int(depth_value)
+                    pixel_shift = depth_map_scaled[pixel_index]
+                    # depth_value = depth_map_resized[int( pixel_index / 3)]
+                    # pixel_shift = depth_map_scaled[pixel_index]
+                    
+                    new_x = pixel_index + pixel_shift
+                    rval = image_np[pixel_index]
+                    gval = image_np[pixel_index+1]
+                    bval = image_np[pixel_index+2]
+                    redraw_end = new_x + pixel_shift + 10
+                    row_end = min(redraw_end, len(shifted_image)-3)
+                    # row_end = min(redraw_end, next_row_start, len(shifted_image)-3)
+
+                    # update_array = image_np[pixel_index:pixel_index+3]
+                    # for i in range(new_x, row_end-2, 3):
+                    #     shifted_image[i:i+3] = update_array#image_np[pixel_index:pixel_index+3]
+                    # shifted_image[new_x:row_end-1] = rval
+                    # shifted_image[new_x+1:row_end] = gval
+                    # shifted_image[new_x+2:row_end+1] = bval
+
+                    for i in range(new_x, row_end, 3):
+                        # if new_x + i  >= width or new_x  < 0:
+                        #     break
+                        # new_coords = (y, new_x + i)
+                        shifted_image[i] = rval
+                        shifted_image[i+1] = gval
+                        shifted_image[i+2] = bval
+
+            shifted_image_tensor = torch.tensor(shifted_image, device=device).view(width, height, 3)
+            unsqueezed = shifted_image_tensor.unsqueeze(0).unsqueeze(0)
+            # return shifted_image_tensor.unsqueeze(0).unsqueeze(0)
+            out_tensors[batch, :, :, :] = unsqueezed
+
+        return out_tensors.unsqueeze(0)
 
 
-        si32 = shifted_image.astype(np.float32)
+        # return torch.tensor(shifted_image).view(width, height, 3).unsqueeze(0).unsqueeze(0)
+        # si32 = shifted_image.astype(np.float32)
         # Convert back to tensor if needed
-        shifted_image_tensor = torch.tensor(si32 / 255.0).view(1, width, height, 3).unsqueeze(0)#.unsqueeze(0)  # Convert back to CxHxW
-        return shifted_image_tensor
+        # shifted_image_tensor = torch.tensor(si32 / 255.0).view(1, width, height, 3).unsqueeze(0)#.unsqueeze(0)  # Convert back to CxHxW
+        # shifted_image_tensor = torch.tensor(si32 / 255.0).view(width, height, 3)#.unsqueeze(0)#.unsqueeze(0)  # Convert back to CxHxW
+        shifted_image_tensor = torch.tensor(shifted_image)#.view(width, height, 3)#.unsqueeze(0)#.unsqueeze(0)  # Convert back to CxHxW
+        out_tensors[i, :, :, :] = shifted_image_tensor.unsqueeze(0)
+        return out_tensors.unsqueeze(0)
     
     # def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Left"):
     #     """
