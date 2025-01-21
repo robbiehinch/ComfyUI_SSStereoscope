@@ -220,52 +220,96 @@ class ShiftedImage:
         """
         device = base_image.device
         out_tensors = torch.zeros_like(base_image, device=device)
-        for batch, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
+        for batch, (base_image, depth_map) in tqdm.tqdm(enumerate(zip(base_image, depth_map))):
 
             image_np = base_image.cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
 
-            depth_map_np = depth_map.cpu().numpy()  # Convert from CxHxW to HxWxC
+            depth_map_np = depth_map.mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
             height, width, _ = base_image.shape
 
             # Calculate the zoom factors for each axis
             zoom_factors = (
                 width / depth_map.shape[0],  # Height scaling factor
                 height / depth_map.shape[1],  # Width scaling factor
-                1,  # colour scaling factor
+                # 1,  # colour scaling factor
             )
 
             depth_scaling = 255 * depth_scale / width 
 
             depth_map_resized = zoom(depth_map_np, zoom_factors, order=0).flatten()
-            depth_map_resized = gaussian_filter(depth_map_resized, sigma=1)
+            # depth_map_resized = gaussian_filter(depth_map_resized, sigma=1)
             depth_map_scaled = depth_map_resized * depth_scaling
             depth_map_scaled = depth_map_scaled.astype(int)
-            depth_map_scaled *= 3
 
             shifted_image = np.zeros(image_np.size)
+            row_size = width * 3
+            # all_shifts = [np.arange(x + depth_map_scaled[x], min(x + depth_map_scaled[x] + depth_map_scaled[x] + 10, len(shifted_image))) for x in np.arange(len(depth_map_scaled))]
+            # all_shifts = [np.arange(x*3 + scale, min(x*3 + scale + scale + 10, len(shifted_image) - 2), 3) for x, scale in enumerate(depth_map_scaled)]
+            # all_shift_ranges = [(x*3 + scale, min(x*3 + scale + scale + 10, len(shifted_image) - 2)) for x, scale in enumerate(depth_map_scaled)]
 
-            # Create an empty image for the side-by-side result
 
-            pbar = ProgressBar(height)
-            # generating the shifted image
-            full_width = width * 3
-            for row_start in tqdm.tqdm(range(0, height*full_width, full_width)):
-                pbar.update(1)
-                next_row_start = row_start + full_width
-                for pixel_index in range(row_start, next_row_start, 3):
-                    pixel_shift = depth_map_scaled[pixel_index]
+            # Reshape image and compute pixel shifts in bulk
+            image_reshaped = image_np.reshape(-1, 3)
+            image_len = len(shifted_image)
+
+            # Vectorized pixel shifts calculation
+            indices = np.arange(len(depth_map_scaled))  # Vector of indices
+            pixel_shifts = np.stack([
+                indices + depth_map_scaled,
+                indices + depth_map_scaled * 2 + 3
+            ], axis=1) * 3  # Shape: (N, 2)
+
+            # Clip the shifts
+            pixel_shifts = pixel_shifts.clip(0, image_len)
+
+            # Vectorized processing
+            starts, stops = pixel_shifts[:, 0], pixel_shifts[:, 1]
+            tilecounts = (stops - starts) // 3
+
+            # Preallocate output buffer
+            all_indices = np.concatenate([np.arange(start, stop) for start, stop in zip(starts, stops)])
+            all_rgb = np.repeat(image_reshaped, tilecounts, axis=0)
+
+            # Assign in one go
+            shifted_image[all_indices] = all_rgb.ravel()
+
+            # image_reshaped = image_np.reshape(-1, 3)
+            # image_len = len(shifted_image)
+            # pixel_shifts = np.array([(i + depth_scale, i + depth_scale * 2 + 3) for i, depth_scale in enumerate(depth_map_scaled)])
+            # pixel_shifts *= 3
+            # pixel_shifts = pixel_shifts.clip(0, image_len)
+            # for rgb, (start, stop) in tqdm.tqdm(zip(image_reshaped, pixel_shifts)):
+            #     tilecount = int((stop - start) / 3)
+            #     rgbtile = np.tile(rgb, tilecount)
+            #     shifted_image[start:stop] = rgbtile
+
+
+            # for (r, g, b), shift in zip(image_reshaped, all_shifts):
+            #     shifted_image[shift] = r
+            #     shifted_image[shift+1] = g
+            #     shifted_image[shift+2] = b
+            # for pixel, shift in enumerate(all_shifts):
+            #     shifted_image[shift] = image_np[pixel]
+            #     shifted_image[shift + 1] = image_np[pixel + 1]
+            #     shifted_image[shift + 2] = image_np[pixel + 2]
+
+            # depth_map_scaled *= 3
+            # for row_start in tqdm.tqdm(range(0, height*row_size, row_size)):
+            #     next_row_start = row_start + row_size
+            #     for pixel_index in range(row_start, next_row_start, 3):
+            #         pixel_shift = depth_map_scaled[int(pixel_index/3)]
                     
-                    new_x = pixel_index + pixel_shift
-                    rval = image_np[pixel_index]
-                    gval = image_np[pixel_index+1]
-                    bval = image_np[pixel_index+2]
-                    redraw_end = new_x + pixel_shift + 10
-                    row_end = min(redraw_end, len(shifted_image)-3)
+            #         new_x = pixel_index + pixel_shift
+            #         rval = image_np[pixel_index]
+            #         gval = image_np[pixel_index+1]
+            #         bval = image_np[pixel_index+2]
+            #         redraw_end = new_x + pixel_shift + 10
+            #         row_end = min(redraw_end, len(shifted_image)-3)
 
-                    for i in range(new_x, row_end, 3):
-                        shifted_image[i] = rval
-                        shifted_image[i+1] = gval
-                        shifted_image[i+2] = bval
+            #         for i in range(new_x, row_end, 3):
+            #             shifted_image[i] = rval
+            #             shifted_image[i+1] = gval
+            #             shifted_image[i+2] = bval
 
             out_tensors[batch, :, :, :] = torch.tensor(shifted_image, device=device).view(height, width, 3)
 
