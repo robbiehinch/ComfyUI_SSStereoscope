@@ -222,96 +222,55 @@ class ShiftedImage:
         out_tensors = torch.zeros_like(base_image, device=device)
         for batch, (base_image, depth_map) in tqdm.tqdm(enumerate(zip(base_image, depth_map))):
 
-            image_np = base_image.cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
-
-            depth_map_np = depth_map.mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
+            # Flatten the image tensor
+            image_tensor = base_image.flatten(0, 1)  # Convert from CxHxW to HxWxC and flatten
             height, width, _ = base_image.shape
 
-            # Calculate the zoom factors for each axis
-            zoom_factors = (
-                width / depth_map.shape[0],  # Height scaling factor
-                height / depth_map.shape[1],  # Width scaling factor
-                # 1,  # colour scaling factor
-            )
+            # Process depth_map tensor
+            depth_map_tensor = depth_map.mean(dim=2)  # Average along the channel dimension
+            depth_scaling = 255 * depth_scale / width
 
-            depth_scaling = 255 * depth_scale / width 
+            # Resize depth_map using F.interpolate
+            depth_map_resized = F.interpolate(
+                depth_map_tensor.unsqueeze(0).unsqueeze(0),  # Add batch and channel dimensions
+                size=(height, width),
+                mode='nearest'
+            ).squeeze().flatten()  # Remove batch and channel dimensions, and flatten
 
-            depth_map_resized = zoom(depth_map_np, zoom_factors, order=0).flatten()
-            # depth_map_resized = gaussian_filter(depth_map_resized, sigma=1)
-            depth_map_scaled = depth_map_resized * depth_scaling
-            depth_map_scaled = depth_map_scaled.astype(int)
+            # Scale depth map
+            depth_map_scaled = (depth_map_resized * depth_scaling).long()
 
-            shifted_image = np.zeros(image_np.size)
-            row_size = width * 3
-            # all_shifts = [np.arange(x + depth_map_scaled[x], min(x + depth_map_scaled[x] + depth_map_scaled[x] + 10, len(shifted_image))) for x in np.arange(len(depth_map_scaled))]
-            # all_shifts = [np.arange(x*3 + scale, min(x*3 + scale + scale + 10, len(shifted_image) - 2), 3) for x, scale in enumerate(depth_map_scaled)]
-            # all_shift_ranges = [(x*3 + scale, min(x*3 + scale + scale + 10, len(shifted_image) - 2)) for x, scale in enumerate(depth_map_scaled)]
+            # Preallocate shifted_image tensor
+            shifted_image = torch.zeros_like(image_tensor)
 
-
-            # Reshape image and compute pixel shifts in bulk
-            image_reshaped = image_np.reshape(-1, 3)
-            image_len = len(shifted_image)
-
-            # Vectorized pixel shifts calculation
-            indices = np.arange(len(depth_map_scaled))  # Vector of indices
-            pixel_shifts = np.stack([
+            # Compute pixel shifts
+            indices = torch.arange(len(depth_map_scaled), device=device)
+            pixel_shifts = torch.stack([
                 indices + depth_map_scaled,
                 indices + depth_map_scaled * 2 + 3
-            ], axis=1) * 3  # Shape: (N, 2)
+            ], dim=1)
 
-            # Clip the shifts
-            pixel_shifts = pixel_shifts.clip(0, image_len)
+            # Clip shifts
+            pixel_shifts = pixel_shifts.clamp(0, depth_map_scaled.numel() - 1)
 
-            # Vectorized processing
+            # Start and stop indices
             starts, stops = pixel_shifts[:, 0], pixel_shifts[:, 1]
             tilecounts = (stops - starts) // 3
 
-            # Preallocate output buffer
-            all_indices = np.concatenate([np.arange(start, stop) for start, stop in zip(starts, stops)])
-            all_rgb = np.repeat(image_reshaped, tilecounts, axis=0)
+            # Generate all_indices and all_rgb in a vectorized manner
+            tile_lengths = stops - starts
+            all_indices = torch.cat([torch.arange(start, stop, device=device) for start, stop in zip(starts, stops)])
+            expanded_rgb_indices = torch.repeat_interleave(torch.arange(len(tilecounts), device=device), tile_lengths)
+            all_rgb = image_tensor[expanded_rgb_indices]
 
-            # Assign in one go
-            shifted_image[all_indices] = all_rgb.ravel()
+            # Assign values
+            shifted_image[all_indices] = all_rgb
 
-            # image_reshaped = image_np.reshape(-1, 3)
-            # image_len = len(shifted_image)
-            # pixel_shifts = np.array([(i + depth_scale, i + depth_scale * 2 + 3) for i, depth_scale in enumerate(depth_map_scaled)])
-            # pixel_shifts *= 3
-            # pixel_shifts = pixel_shifts.clip(0, image_len)
-            # for rgb, (start, stop) in tqdm.tqdm(zip(image_reshaped, pixel_shifts)):
-            #     tilecount = int((stop - start) / 3)
-            #     rgbtile = np.tile(rgb, tilecount)
-            #     shifted_image[start:stop] = rgbtile
+            # Reshape shifted_image back to HxWxC
+            shifted_image = shifted_image.view(height, width, 3)
 
-
-            # for (r, g, b), shift in zip(image_reshaped, all_shifts):
-            #     shifted_image[shift] = r
-            #     shifted_image[shift+1] = g
-            #     shifted_image[shift+2] = b
-            # for pixel, shift in enumerate(all_shifts):
-            #     shifted_image[shift] = image_np[pixel]
-            #     shifted_image[shift + 1] = image_np[pixel + 1]
-            #     shifted_image[shift + 2] = image_np[pixel + 2]
-
-            # depth_map_scaled *= 3
-            # for row_start in tqdm.tqdm(range(0, height*row_size, row_size)):
-            #     next_row_start = row_start + row_size
-            #     for pixel_index in range(row_start, next_row_start, 3):
-            #         pixel_shift = depth_map_scaled[int(pixel_index/3)]
-                    
-            #         new_x = pixel_index + pixel_shift
-            #         rval = image_np[pixel_index]
-            #         gval = image_np[pixel_index+1]
-            #         bval = image_np[pixel_index+2]
-            #         redraw_end = new_x + pixel_shift + 10
-            #         row_end = min(redraw_end, len(shifted_image)-3)
-
-            #         for i in range(new_x, row_end, 3):
-            #             shifted_image[i] = rval
-            #             shifted_image[i+1] = gval
-            #             shifted_image[i+2] = bval
-
-            out_tensors[batch, :, :, :] = torch.tensor(shifted_image, device=device).view(height, width, 3)
+            # Assign to output tensor
+            out_tensors[batch, :, :, :] = shifted_image
 
         return out_tensors.unsqueeze(0)
 
