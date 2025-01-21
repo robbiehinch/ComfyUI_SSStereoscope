@@ -3,6 +3,7 @@ from PIL import Image
 import numpy as np
 import tqdm
 import torch.nn.functional as F
+from scipy.ndimage import zoom
 
 from comfy.utils import ProgressBar
 
@@ -45,9 +46,9 @@ class SideBySide:
         out_tensors = base_image.clone()
         for i, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
             # Ensure base_image and depth_map are on CPU and convert to NumPy
-            image_np = base_image.cpu().numpy()  # H x W x C
+            image_np = base_image.squeeze(0).cpu().numpy()  # H x W x C
             # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
-            depth_map_np = depth_map.squeeze(0).cpu().numpy().mean(2)    # H x W
+            depth_map_np = depth_map.squeeze(0).squeeze(0).cpu().numpy().mean(2)    # H x W
 
             # Normalize images if necessary
             if image_np.dtype != np.uint8:
@@ -57,8 +58,16 @@ class SideBySide:
 
             height, width, _ = image_np.shape
 
+            # Calculate the zoom factors for each axis
+            zoom_factors = (
+                width / depth_map.shape[0],  # Height scaling factor
+                height / depth_map.shape[1],  # Width scaling factor
+            )
+            
+            # Use zoom with order=0 for nearest-neighbor interpolation
             # Resize depth map to match base image using NumPy (nearest-neighbor)
-            depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+            # depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+            depth_map_resized = zoom(depth_map, zoom_factors, order=0)
 
             # Determine flip offset based on mode
             flip_offset = width if mode == "Cross-eyed" else 0
@@ -97,7 +106,7 @@ class SideBySide:
             sbs_image[flat_y, target_x] = image_np[flat_y, flat_x]
 
             # Convert back to torch tensor
-            sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0)  # 1 x C x H x (2W)
+            sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
             out_tensors[i, :, :, :] = sbs_image_tensor
 
         return out_tensors.unsqueeze(0)
@@ -121,69 +130,228 @@ class ShiftedImage:
     FUNCTION = "ShiftedImage"
     CATEGORY = "👀 SamSeen"
 
-    def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Left"):
+    # def ShiftedImageTensorTry(self, base_image, depth_map, depth_scale, mode="Left"):
+    #     """
+    #     Shift the base image using a depth map and return the shifted image.
+
+    #     Parameters:
+    #     - base_image: PyTorch tensor of shape (1, C, H, W)
+    #     - depth_map: PyTorch tensor of shape (1, 1, H, W)
+    #     - depth_scale: Integer representing the scaling factor for depth.
+    #     - mode: "Left", "Right", or "Cross-eyed" to select the shifted image direction.
+
+    #     Returns:
+    #     - shifted_image_tensor: The shifted image as a PyTorch tensor of shape (1, C, H, 2W)
+    #     """
+    #     # Remove batch dimensions
+    #     # image = base_image.squeeze(0)          # Shape: (C, H, W)
+    #     # depth = depth_map.squeeze(0).squeeze(0)  # Shape: (H, W)
+
+    #     batch_size, height, width, channels = base_image.shape
+    #     out_tensors = base_image.clone()
+
+    #     # Resize depth map to match base image using NumPy (nearest-neighbor)
+    #     # depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+
+    #     B,H,W, C = base_image.shape
+
+    #     resized_depth_map = F.interpolate(depth_map.permute(0, 3, 1, 2), size=(height, width), mode="nearest-exact").permute(0, 2, 3, 1)
+    #     depth_map_mean = resized_depth_map.mean(dim=3)
+
+    #     # Determine flip offset based on mode
+    #     flip_offset = width if mode == "Cross-eyed" else 0
+
+    #     # Calculate pixel shifts
+    #     depth_scaling = depth_scale / width
+    #     pixel_shift = (depth_map_mean * depth_scaling).type(torch.int64)  # H x W
+
+    #     # Create coordinate grids
+    #     # y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+    #     y_coords, x_coords = torch.meshgrid(
+    #         torch.arange(height, device=base_image.device),
+    #         torch.arange(width, device=base_image.device),
+    #         indexing='ij'
+    #     )
+
+    #     # Calculate new x coordinates with shift
+    #     new_x = x_coords + pixel_shift
+
+    #     # Clamp new_x to [0, width-1]
+    #     new_x = torch.clamp(new_x, 0, width - 1)
+    #     new_x = new_x.unsqueeze(1).expand(-1, 3, -1, -1)
+
+    #     bp = base_image.permute(0, 3, 1, 2)
+    #     shifted_image = bp.clone()
+    #     # flat_y = y_coords.flatten()
+    #     flat_x = x_coords * width + y_coords
+    #     flat_new_x = new_x * width + y_coords
+    #     # flat_new_x = new_x.flatten()
+
+    #     bp_flat = bp.view(B,C, -1)
+    #     new_indices = flat_new_x.view(B,C,-1)
+    #     size = H*W
+    #     new_flat = flat_new_x.view(B,C,H,W)#.flatten()
+    #     bp_flat = bp.view(B,C,H,W)#.flatten()
+    #     # gathered = torch.gather(bp_flat, 2, new_indices)
+    #     # new_vals = gathered.view(B,C,H,W)
+
+    #     # shifted_image[:, flat_y, flat_new_x, :] = base_image[:, flat_y, flat_x, :]
+
+    #     # bp.flatten()
+    #     shifted_image.flatten().scatter_(0, new_flat.flatten(), bp_flat.flatten())
+    #     p = shifted_image.permute(0, 2, 3, 1)
+    #     return p.unsqueeze(0)
+
+    def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Cross-eyed"):
+
         """
-        Shift the base image using a depth map and return the shifted image.
+        Create a side-by-side (SBS) stereoscopic image from a standard image and a depth map.
 
         Parameters:
-        - base_image: PyTorch tensor of shape (1, C, H, W)
-        - depth_map: PyTorch tensor of shape (1, 1, H, W)
-        - depth_scale: Integer representing the scaling factor for depth.
-        - mode: "Left", "Right", or "Cross-eyed" to select the shifted image direction.
+        - base_image: numpy array representing the base image.
+        - depth_map: numpy array representing the depth map.
+        - depth_scale: integer representing the scaling factor for depth.
+        - modes: 
+        "Parallel" = the right view angle is on the right side 
+        "Cross-eyed" = flipped
 
         Returns:
-        - shifted_image_tensor: The shifted image as a PyTorch tensor of shape (1, C, H, 2W)
+        - sbs_image: the stereoscopic image.
         """
-        # Remove batch dimensions
-        # image = base_image.squeeze(0)          # Shape: (C, H, W)
-        # depth = depth_map.squeeze(0).squeeze(0)  # Shape: (H, W)
 
-        batch_size, height, width, channels = base_image.shape
-        out_tensors = base_image.clone()
-        for i, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
-            # Ensure base_image and depth_map are on CPU and convert to NumPy
-            image_np = base_image.cpu().numpy()  # H x W x C
-            # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
-            depth_map_np = depth_map.squeeze(0).cpu().numpy().mean(2)    # H x W
+        # Convert tensor to numpy array and then to PIL Image
+        image_np = base_image.squeeze(0).cpu().numpy().flatten()  # Convert from CxHxW to HxWxC
+        image_np *= 255
+        image_np = image_np.astype(np.uint8)
+        # image = Image.fromarray((image_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
 
-            # Normalize images if necessary
-            if image_np.dtype != np.uint8:
-                image_np = (image_np * 255).astype(np.uint8)
-            if depth_map_np.dtype != np.uint8:
-                depth_map_np = (depth_map_np * 255).astype(np.uint8)
+        depth_map_np = depth_map.squeeze(0).mean(2).cpu().numpy()  # Convert from CxHxW to HxWxC
+        depth_map_np *= 255
+        # depth_map_img = Image.fromarray((depth_map_np * 255).astype(np.uint8))  # Convert float [0,1] tensor to uint8 image
 
-            height, width, _ = image_np.shape
+        # Get dimensions and resize depth map to match base image
+        _, width, height, _ = base_image.shape
+        # depth_map_img = depth_map_img.resize((width, height), Image.NEAREST)
 
-            # Resize depth map to match base image using NumPy (nearest-neighbor)
-            depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+        # Calculate the zoom factors for each axis
+        zoom_factors = (
+            width / depth_map.shape[0],  # Height scaling factor
+            height / depth_map.shape[1],  # Width scaling factor
+        )
+        
+        # Use zoom with order=0 for nearest-neighbor interpolation
+        # Resize depth map to match base image using NumPy (nearest-neighbor)
+        depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST)).flatten()
+        # depth_map_resized = zoom(depth_map_np, zoom_factors, order=0)
 
-            # Determine flip offset based on mode
-            flip_offset = width if mode == "Cross-eyed" else 0
+        # shifted_image = np.zeros((height, width, 3), dtype=np.uint8)
+        shifted_image = np.copy(image_np)
 
-            # Calculate pixel shifts
-            depth_scaling = depth_scale / width
-            pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+        # Create an empty image for the side-by-side result
 
-            # Create coordinate grids
-            y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+        depth_scaling = depth_scale / width 
+        pbar = ProgressBar(height)
 
-            # Calculate new x coordinates with shift
-            new_x = x_coords + pixel_shift
+        # Fill the base images 
+        # for y in range(height):
+        #     for x in range(width):
+        #         color = image.getpixel((x, y))
+        #         shifted_image[y, x] = color
 
-            # Clamp new_x to [0, width-1]
-            new_x = np.clip(new_x, 0, width - 1)
-            sbs_image = np.tile(image_np, (1, 1, 1))  # H x (2W) x C
-            flat_y = y_coords.flatten()
-            flat_x = x_coords.flatten()
-            flat_new_x = new_x.flatten()
+        dpeth_max = depth_map_resized.max()
 
-            sbs_image[flat_y, flat_new_x] = image_np[flat_y, flat_x]
+        # generating the shifted image
+        for y in tqdm.tqdm(range(height)):
+            pbar.update(1)
+            row_start = y * width * 3
+            next_row_start = row_start + width * 3
+            for pixel_index in range(row_start, next_row_start, 3):
+                depth_value = depth_map_resized[int( pixel_index / 3)]
+                pixel_shift = int(depth_value * depth_scaling) * 3
+                
+                new_x = pixel_index + pixel_shift
+                rval = image_np[pixel_index]
+                gval = image_np[pixel_index+1]
+                bval = image_np[pixel_index+2]
+                redraw_end = (pixel_shift + 3) * 3
+                row_end = min(new_x + redraw_end, next_row_start)
+                for i in range(new_x, row_end, 3):
+                    # if new_x + i  >= width or new_x  < 0:
+                    #     break
+                    # new_coords = (y, new_x + i)
+                    shifted_image[i] = rval
+                    shifted_image[i+1] = gval
+                    shifted_image[i+2] = bval
 
-            # Convert back to torch tensor
-            sbs_image_tensor = torch.from_numpy(sbs_image.astype(np.float32) / 255.0)#.unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
-            out_tensors[i, :, :, :] = sbs_image_tensor
 
-        return out_tensors.unsqueeze(0)
+        si32 = shifted_image.astype(np.float32)
+        # Convert back to tensor if needed
+        shifted_image_tensor = torch.tensor(si32 / 255.0).view(1, width, height, 3).unsqueeze(0)#.unsqueeze(0)  # Convert back to CxHxW
+        return shifted_image_tensor
+    
+    # def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Left"):
+    #     """
+    #     Shift the base image using a depth map and return the shifted image.
+
+    #     Parameters:
+    #     - base_image: PyTorch tensor of shape (1, C, H, W)
+    #     - depth_map: PyTorch tensor of shape (1, 1, H, W)
+    #     - depth_scale: Integer representing the scaling factor for depth.
+    #     - mode: "Left", "Right", or "Cross-eyed" to select the shifted image direction.
+
+    #     Returns:
+    #     - shifted_image_tensor: The shifted image as a PyTorch tensor of shape (1, C, H, 2W)
+    #     """
+    #     # Remove batch dimensions
+    #     # image = base_image.squeeze(0)          # Shape: (C, H, W)
+    #     # depth = depth_map.squeeze(0).squeeze(0)  # Shape: (H, W)
+
+    #     batch_size, height, width, channels = base_image.shape
+    #     out_tensors = base_image.clone()
+    #     for i, (base_image, depth_map) in enumerate(zip(base_image, depth_map)):
+    #         # Ensure base_image and depth_map are on CPU and convert to NumPy
+    #         image_np = base_image.cpu().numpy()  # H x W x C
+    #         # image_np = base_image.squeeze(0).permute(1, 2, 0).cpu().numpy()  # H x W x C
+    #         depth_map_np = depth_map.squeeze(0).cpu().numpy().mean(2)    # H x W
+
+    #         # Normalize images if necessary
+    #         if image_np.dtype != np.uint8:
+    #             image_np = (image_np * 255).astype(np.uint8)
+    #         if depth_map_np.dtype != np.uint8:
+    #             depth_map_np = (depth_map_np * 255).astype(np.uint8)
+
+    #         height, width, _ = image_np.shape
+
+    #         # Resize depth map to match base image using NumPy (nearest-neighbor)
+    #         depth_map_resized = np.array(Image.fromarray(depth_map_np).resize((width, height), Image.NEAREST))
+
+    #         # Determine flip offset based on mode
+    #         flip_offset = width if mode == "Cross-eyed" else 0
+
+    #         # Calculate pixel shifts
+    #         depth_scaling = depth_scale / width
+    #         pixel_shift = (depth_map_resized * depth_scaling).astype(np.int32)  # H x W
+
+    #         # Create coordinate grids
+    #         y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+
+    #         # Calculate new x coordinates with shift
+    #         new_x = x_coords + pixel_shift
+
+    #         # Clamp new_x to [0, width-1]
+    #         new_x = np.clip(new_x, 0, width - 1)
+    #         shifted_image = np.tile(image_np, (1, 1, 1))  # H x (2W) x C
+    #         flat_y = y_coords.flatten()
+    #         flat_x = x_coords.flatten()
+    #         flat_new_x = new_x.flatten()
+
+    #         shifted_image[flat_y, flat_new_x] = image_np[flat_y, flat_x]
+
+    #         # Convert back to torch tensor
+    #         shifted_image_tensor = torch.from_numpy(shifted_image.astype(np.float32) / 255.0)#.unsqueeze(0).unsqueeze(0)  # 1 x C x H x (2W)
+    #         out_tensors[i, :, :, :] = shifted_image_tensor
+
+    #     return out_tensors.unsqueeze(0)
     
         batch_size, H, W, C = base_image.shape
         depth = depth_map.mean(3)
