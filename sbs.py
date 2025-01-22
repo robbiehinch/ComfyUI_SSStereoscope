@@ -240,8 +240,8 @@ class ShiftedImage:
             depth_map_scaled = depth_map_scaled.astype(int)
 
             # Vectorized pixel shifts calculation
-            indices = np.arange(width)  # Vector of indices
-            pixel_shifts = np.stack([
+            indices = torch.arange(width)  # Vector of indices
+            pixel_shifts = torch.stack([
                 indices + depth_map_scaled,
                 indices + depth_map_scaled * 2 + 3
             ], axis=1)  # Shape: (N, 2)
@@ -252,15 +252,19 @@ class ShiftedImage:
             # Vectorized processing
             starts, stops = pixel_shifts[:, 0], pixel_shifts[:, 1]
 
-            shifted_image = np.zeros(image_np.shape)#.flatten()
+            shifted_image = image_np.clone()#.flatten()
 
-            for image_row, shifted_image_row, starts_row, stops_row in zip(image_np, shifted_image, starts, stops):
-                for pixel_vals, start, stop in zip(image_row, starts_row, stops_row):
-                    repeat_count = stop - start
-                    if repeat_count > 0:
-                        tiles = [pixel_vals] * repeat_count
-                        shifted_image_row[start:stop, :] = tiles
+            repeat_counts = stops - starts  # Shape: (rows, cols)
+            valid = repeat_counts > 0
+            row_indices, col_indices = np.where(valid)
+            pixel_values = image_np[row_indices, col_indices]  # Extract relevant pixel values
+            start_indices = starts[row_indices, col_indices]
+            stop_indices = stops[row_indices, col_indices]
 
+            # Create the target slices in parallel
+            for i, (start, stop, pixel_val) in enumerate(zip(start_indices, stop_indices, pixel_values)):
+                shifted_image[row_indices[i], start:stop] = pixel_val
+                
             out_tensors[batch, :, :, :] = torch.tensor(shifted_image, device=device).view(height, width, 3)
 
         return out_tensors.unsqueeze(0)
