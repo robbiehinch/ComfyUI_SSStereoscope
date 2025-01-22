@@ -236,7 +236,7 @@ class ShiftedImage:
         depth_map_scaled = (depth_map_resized * depth_scaling).to(torch.int32)  # Shape: [batch_size, H, W]
 
         # Step 4: Compute pixel shifts
-        indices = torch.arange(width, device=base_image.device, dtype=torch.int32).expand(batch_size, -1)  # Shape: [batch_size, width]
+        indices = torch.arange(width, device=base_image.device, dtype=torch.int32).expand(batch_size, -1).unsqueeze(1)  # Shape: [batch_size, width]
 
         starts = indices + depth_map_scaled
         stops = indices + depth_map_scaled * 2 + 3
@@ -244,15 +244,16 @@ class ShiftedImage:
         starts = torch.clamp(starts, 0, width)
         stops = torch.clamp(stops, 0, width)
 
+        # out_tensors = torch.zeros(base_image.shape)
+        out_tensors = base_image.clone()
+
         # Step 6: Parallel update of shifted images
         for b in range(batch_size):
             # Extract rows where shifts are valid
             batch_image = base_image[b]
             batch_starts = starts[b]
             batch_stops = stops[b]
-
-            shifted_image = torch.zeros(base_image[b].shape)
-            # shifted_image = base_image[b].clone()
+            shifted_image = out_tensors[b]
 
             for start_column, stop_column, image_column in tqdm.tqdm(zip(batch_starts.permute(1, 0), batch_stops.permute(1, 0), batch_image.permute(1, 0, 2))):
                 start_min = start_column.min()
@@ -273,40 +274,6 @@ class ShiftedImage:
                 source_expanded = source_expanded.expand(-1, num_columns, -1)
                 source_masked = source_expanded[mask]
                 slice_shift[mask] = source_masked
-                # shifted_image[col_num, start_column:stop_column, :] = image_column
-
-            # for row_num, (start_row, stop_row, image_row) in enumerate(zip(batch_starts, batch_stops, batch_image)):
-            #     fill_grid = torch.arange(width).unsqueeze(0)
-            #     start_unsqueeze = start_row.unsqueeze(1)
-            #     stop_unsqueeze = stop_row.unsqueeze(1)
-            #     start_mask = fill_grid > start_unsqueeze
-            #     stop_mask = fill_grid <= stop_unsqueeze
-            #     masks = start_mask & stop_mask
-            #     expanded_pixels = image_row.unsqueeze(1).expand(-1, 1024, -1)  # Shape: [1024, 1024, 3]
-
-            #     masked_pixels = expanded_pixels * masks.unsqueeze(-1)  # Shape: [1024, 1024, 3]
-
-            #     for i, (strt, stp) in enumerate(zip(start_column, stop_column)):
-            #         mask[i, strt:stp] = True
-
-            #     slice_shift = shifted_image[:, start_min:stop_max, :]
-            #     masked = slice_shift[mask]
-            #     slice_shift[:,mask] = image_column
-            #     # shifted_image[col_num, start_column:stop_column, :] = image_column
-
-            out_tensors[b] = shifted_image
-
-            # start_indices = starts[b, col_indices]
-            # stop_indices = stops[b, col_indices]
-            
-            # # Update shifted image
-            # shifted_image = base_image[b].clone()
-            # for i, (start, stop, pixel_val) in enumerate(zip(start_indices, stop_indices, pixel_values)):
-            #     row_index = row_indices[i]
-            #     shifted_image[row_index, start:stop, :] = pixel_val
-            
-            # # Assign shifted image to the output
-            # out_tensors[b] = shifted_image
 
         return out_tensors.unsqueeze(0)
 
