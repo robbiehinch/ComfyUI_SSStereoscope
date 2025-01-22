@@ -264,14 +264,32 @@ class ShiftedImage:
 
             # Vectorized processing
             starts, stops = pixel_shifts[:, 0], pixel_shifts[:, 1]
-            tilecounts = (stops - starts) // 3
 
-            # Preallocate output buffer
-            all_indices = np.concatenate([np.arange(start, stop) for start, stop in zip(starts, stops)])
-            all_rgb = np.repeat(image_reshaped, tilecounts, axis=0)
+            max_index = stops.max()
+
+            # Array to store the "last write index" for each destination
+            last_write = np.full(image_len, -1, dtype=int)
+            last_write = last_write.clip(0, image_len)
+
+            # Iterate through the ranges and update the last write index
+            for i, (start, stop) in enumerate(zip(starts, stops)):
+                rgb_offset = i*3
+                # indices = np.arange(rgb_offset, rgb_offset+3)
+                repeat_count = int((stop - start) / 3)
+                # repeats = np.tile(indices, repeat_count)
+                # last_write[start:stop] = repeats
+                last_write[start:stop] = [rgb_offset, rgb_offset+1, rgb_offset+2] * repeat_count
+                
+            # expanded_arr = np.repeat(last_write * 3, 3) + np.tile(np.arange(3), len(last_write))
+
+            # tilecounts = (stops - starts) // 3
+
+            # # Preallocate output buffer
+            # all_indices = np.concatenate([np.arange(start, stop) for start, stop in zip(starts, stops)])
+            # all_rgb = np.repeat(image_reshaped, tilecounts, axis=0)
 
             # Assign in one go
-            shifted_image[all_indices] = all_rgb.ravel()
+            shifted_image[last_write] = image_np
 
             # image_reshaped = image_np.reshape(-1, 3)
             # image_len = len(shifted_image)
