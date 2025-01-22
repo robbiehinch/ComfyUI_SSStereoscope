@@ -248,32 +248,54 @@ class ShiftedImage:
         out_tensors = base_image.clone()
 
         # Step 6: Parallel update of shifted images
-        for b in range(batch_size):
+        # for b in range(batch_size):
             # Extract rows where shifts are valid
-            batch_image = base_image[b]
-            batch_starts = starts[b]
-            batch_stops = stops[b]
-            shifted_image = out_tensors[b]
+        # batch_image = base_image[b]
+        # batch_starts = starts[b]
+        # batch_stops = stops[b]
+        # shifted_image = out_tensors[b]
 
-            for start_column, stop_column, image_column in tqdm.tqdm(zip(batch_starts.permute(1, 0), batch_stops.permute(1, 0), batch_image.permute(1, 0, 2))):
-                start_min = start_column.min()
-                stop_max = start_column.max()
-                col_starts = start_column - start_min
-                col_stops = stop_column - start_min
-                num_columns = stop_max - start_min
 
-                rnge = torch.arange(num_columns).unsqueeze(0)
-                start_mask = (rnge >= col_starts.unsqueeze(1))
-                stop_mask = (rnge <= col_stops.unsqueeze(1))
-                mask = start_mask & stop_mask
+        for column in range(width):
+            start_col = starts[:, :, column]  # Start column for each batch
+            stop_col = stops[:, :, column]   # Stop column for each batch
 
-                # Expand the source tensor to match the target shape
-                source_expanded = image_column.unsqueeze(1)  # Shape (681, 1, 3)
+            # Determine valid ranges for each pixel shift
+            start_min, _ = start_col.min(dim=1)
+            stop_max, _ = torch.max(stop_col, dim=1)
+            valid_range = torch.arange(start_min.min(), stop_max.max(), device=base_image.device).unsqueeze(0).unsqueeze(2) #.unsqueeze(0)
+            start_mask = (valid_range >= start_col.unsqueeze(1))  # Mask for starts
+            stop_mask = (valid_range <= stop_col.unsqueeze(1))   # Mask for stops
+            mask = start_mask & stop_mask  # Combine masks
 
-                slice_shift = shifted_image[:, start_min:stop_max, :]
-                source_expanded = source_expanded.expand(-1, num_columns, -1)
-                source_masked = source_expanded[mask]
-                slice_shift[mask] = source_masked
+            # Apply the shifts to the output tensor
+            mask = mask.permute(0, 2, 1)
+            source = base_image[:, :, column]
+            source_unsqueezed = source.unsqueeze(2)
+            source_expanded = source_unsqueezed.expand(-1, -1, mask.size(2), -1, )  # Expand for broadcasting
+            output_target = out_tensors[:, :, start_min.min():stop_max.max()]
+            output_target[mask] = source_expanded[mask]#.unsqueeze(1).float()
+
+        # for start_column, stop_column, image_column in tqdm.tqdm(zip(starts.permute(1, 0), stops.permute(1, 0), base_image.permute(1, 0, 2))):
+        # # for start_column, stop_column, image_column in tqdm.tqdm(zip(batch_starts.permute(1, 0), batch_stops.permute(1, 0), batch_image.permute(1, 0, 2))):
+        #     start_min = start_column.min()
+        #     stop_max = start_column.max()
+        #     col_starts = start_column - start_min
+        #     col_stops = stop_column - start_min
+        #     num_columns = stop_max - start_min
+
+        #     rnge = torch.arange(num_columns).unsqueeze(0)
+        #     start_mask = (rnge >= col_starts.unsqueeze(1))
+        #     stop_mask = (rnge <= col_stops.unsqueeze(1))
+        #     mask = start_mask & stop_mask
+
+        #     # Expand the source tensor to match the target shape
+        #     source_expanded = image_column.unsqueeze(1)  # Shape (681, 1, 3)
+
+        #     slice_shift = out_tensors[:, start_min:stop_max, :]
+        #     source_expanded = source_expanded.expand(-1, num_columns, -1)
+        #     source_masked = source_expanded[mask]
+        #     slice_shift[mask] = source_masked
 
         return out_tensors.unsqueeze(0)
 
