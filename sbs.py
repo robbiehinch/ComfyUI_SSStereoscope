@@ -152,7 +152,7 @@ class ShiftedImage:
         # depth_map = depth_map.to('cuda')
 
         # Assuming base_images and depth_maps are provided (Shape: [batch_size, C, H, W])
-        batch_size, height, width, _ = base_image.shape
+        batch_size, height, width, C = base_image.shape
 
         # Preallocate output tensor
         out_tensors = torch.zeros_like(base_image)
@@ -192,7 +192,9 @@ class ShiftedImage:
             batch_stops = stops[batch_start:batch_end].to(device)
             batch_source = base_image[batch_start:batch_end].to(device)
             batch_out = batch_source.clone()
-            for column in tqdm.tqdm(range(width)):
+
+            col_range = range(width) if eye == "Left" else range(width-1,-1, -1)
+            for column in tqdm.tqdm(col_range):
                 start_col = batch_starts[:, :, column]#.to(device)  # Start column for each batch
                 stop_col = batch_stops[:, :, column]#.to(device)   # Stop column for each batch
 
@@ -208,11 +210,14 @@ class ShiftedImage:
 
                 # Apply the shifts to the output tensor
                 mask = mask.permute(0, 2, 1)
+                calc_mask = mask.float().unsqueeze(-1).expand(-1, -1, -1, C)
                 source = batch_source[:, :, column]#.to(device)
                 source_unsqueezed = source.unsqueeze(2)
                 source_expanded = source_unsqueezed.expand(-1, -1, mask.size(2), -1, )  # Expand for broadcasting
                 output_target = batch_out[:, :, lowest_min:highest_max]
-                output_target[mask] = source_expanded[mask]#.to(offload_device)
+                # mask_result = (batch_out[:, :, lowest_min:highest_max] * mask) + (source_expanded * mask)#.to(offload_device)
+                output_target[mask] = (source_expanded * calc_mask)[mask]
+                # output_target = (source_expanded * calc_mask)
             
             out_tensors[batch_start:batch_end] = batch_out.to(offload_device)
 
