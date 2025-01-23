@@ -123,7 +123,7 @@ class ShiftedImage:
                 "base_image": ("IMAGE",),
                 "depth_map": ("IMAGE",),
                 "depth_scale": ("INT", {"default": 50}),
-                "mode": (["Parallel", "Cross-eyed"], {}),
+                "eye": (["Left", "Right"], {}),
             },
         }
 
@@ -131,7 +131,7 @@ class ShiftedImage:
     FUNCTION = "ShiftedImage"
     CATEGORY = "👀 SamSeen"
 
-    def ShiftedImage(self, base_image, depth_map, depth_scale, mode="Cross-eyed"):
+    def ShiftedImage(self, base_image, depth_map, depth_scale, eye="Left"):
 
         """
         Create a side-by-side (SBS) stereoscopic image from a standard image and a depth map.
@@ -140,9 +140,7 @@ class ShiftedImage:
         - base_image: numpy array representing the base image.
         - depth_map: numpy array representing the depth map.
         - depth_scale: integer representing the scaling factor for depth.
-        - modes: 
-        "Parallel" = the right view angle is on the right side 
-        "Cross-eyed" = flipped
+        - eye: the eye viewing it (left eye sees more of the left side so pixels are shifted to the right ('+'))
 
         Returns:
         - sbs_image: the stereoscopic image.
@@ -172,8 +170,12 @@ class ShiftedImage:
         # Step 4: Compute pixel shifts
         indices = torch.arange(width, device=depth_map.device, dtype=torch.int32).expand(batch_size, -1).unsqueeze(1)  # Shape: [batch_size, width]
 
-        starts = indices + depth_map_scaled
-        stops = indices + depth_map_scaled * 2 + 3
+        if eye == "Left":
+            starts = indices + depth_map_scaled
+            stops = starts + depth_map_scaled + 3
+        else:
+            stops = indices - depth_map_scaled
+            starts = stops - (depth_map_scaled + 3)
 
         starts = torch.clamp(starts, 0, width)
         stops = torch.clamp(stops, 0, width)
@@ -182,7 +184,7 @@ class ShiftedImage:
         out_tensors = base_image.clone()
 
         pbar = ProgressBar(batch_size)
-        batch_width = 80
+        batch_width = 120
         for batch_start in tqdm.tqdm(range(0, batch_size, batch_width)):
             batch_end = min(batch_start + batch_width, batch_size)
             pbar.update(batch_width)
