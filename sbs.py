@@ -182,13 +182,17 @@ class ShiftedImage:
         out_tensors = base_image.clone()
 
         pbar = ProgressBar(batch_size)
-        batch_width = 150
+        batch_width = 80
         for batch_start in tqdm.tqdm(range(0, batch_size, batch_width)):
             batch_end = min(batch_start + batch_width, batch_size)
             pbar.update(batch_width)
+            batch_starts = starts[batch_start:batch_end].to(device)
+            batch_stops = stops[batch_start:batch_end].to(device)
+            batch_source = base_image[batch_start:batch_end].to(device)
+            batch_out = batch_source.clone()
             for column in tqdm.tqdm(range(width)):
-                start_col = starts[batch_start:batch_end, :, column].to(device)  # Start column for each batch
-                stop_col = stops[batch_start:batch_end, :, column].to(device)   # Stop column for each batch
+                start_col = batch_starts[:, :, column]#.to(device)  # Start column for each batch
+                stop_col = batch_stops[:, :, column]#.to(device)   # Stop column for each batch
 
                 # Determine valid ranges for each pixel shift
                 start_min, _ = start_col.min(dim=1)
@@ -202,11 +206,13 @@ class ShiftedImage:
 
                 # Apply the shifts to the output tensor
                 mask = mask.permute(0, 2, 1)
-                source = base_image[batch_start:batch_end, :, column].to(device)
+                source = batch_source[:, :, column]#.to(device)
                 source_unsqueezed = source.unsqueeze(2)
                 source_expanded = source_unsqueezed.expand(-1, -1, mask.size(2), -1, )  # Expand for broadcasting
-                output_target = out_tensors[batch_start:batch_end, :, lowest_min:highest_max]
-                output_target[mask] = source_expanded[mask].to(offload_device)
+                output_target = batch_out[:, :, lowest_min:highest_max]
+                output_target[mask] = source_expanded[mask]#.to(offload_device)
+            
+            out_tensors[batch_start:batch_end] = batch_out.to(offload_device)
 
         return out_tensors.unsqueeze(0)
 class PairImages:
