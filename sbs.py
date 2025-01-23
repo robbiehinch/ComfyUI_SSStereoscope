@@ -4,6 +4,7 @@ import numpy as np
 import tqdm
 import torch.nn.functional as F
 from scipy.ndimage import zoom
+import comfy.model_management as mm
 
 from comfy.utils import ProgressBar
 
@@ -146,9 +147,11 @@ class ShiftedImage:
         Returns:
         - sbs_image: the stereoscopic image.
         """
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
 
-        base_image = base_image.to('cuda')
-        depth_map = depth_map.to('cuda')
+        # base_image = base_image.to('cuda')
+        # depth_map = depth_map.to('cuda')
 
         # Assuming base_images and depth_maps are provided (Shape: [batch_size, C, H, W])
         batch_size, height, width, _ = base_image.shape
@@ -167,7 +170,7 @@ class ShiftedImage:
         depth_map_scaled = (depth_map_resized * depth_scaling).to(torch.int32)  # Shape: [batch_size, H, W]
 
         # Step 4: Compute pixel shifts
-        indices = torch.arange(width, device=base_image.device, dtype=torch.int32).expand(batch_size, -1).unsqueeze(1)  # Shape: [batch_size, width]
+        indices = torch.arange(width, device=depth_map.device, dtype=torch.int32).expand(batch_size, -1).unsqueeze(1)  # Shape: [batch_size, width]
 
         starts = indices + depth_map_scaled
         stops = indices + depth_map_scaled * 2 + 3
@@ -178,32 +181,34 @@ class ShiftedImage:
         # out_tensors = torch.zeros(base_image.shape)
         out_tensors = base_image.clone()
 
-        # batch_width = 4
-        # for batch_start in range(0, batch_size, batch_width):
-        #     batch_end = min(batch_start + batch_width, batch_size)
-        for column in range(width):
-            start_col = starts[:, :, column]  # Start column for each batch
-            stop_col = stops[:, :, column]   # Stop column for each batch
+        pbar = ProgressBar(batch_size)
+        batch_width = 150
+        for batch_start in tqdm.tqdm(range(0, batch_size, batch_width)):
+            batch_end = min(batch_start + batch_width, batch_size)
+            pbar.update(batch_width)
+            for column in tqdm.tqdm(range(width)):
+                start_col = starts[batch_start:batch_end, :, column].to(device)  # Start column for each batch
+                stop_col = stops[batch_start:batch_end, :, column].to(device)   # Stop column for each batch
 
-            # Determine valid ranges for each pixel shift
-            start_min, _ = start_col.min(dim=1)
-            stop_max, _ = torch.max(stop_col, dim=1)
-            lowest_min = start_min.min()
-            highest_max = stop_max.max()
-            valid_range = torch.arange(lowest_min, highest_max, device=base_image.device).unsqueeze(0).unsqueeze(2) #.unsqueeze(0)
-            start_mask = (valid_range >= start_col.unsqueeze(1))  # Mask for starts
-            stop_mask = (valid_range <= stop_col.unsqueeze(1))   # Mask for stops
-            mask = start_mask & stop_mask  # Combine masks
+                # Determine valid ranges for each pixel shift
+                start_min, _ = start_col.min(dim=1)
+                stop_max, _ = torch.max(stop_col, dim=1)
+                lowest_min = start_min.min()
+                highest_max = stop_max.max()
+                valid_range = torch.arange(lowest_min, highest_max, device=device).unsqueeze(0).unsqueeze(2) #.unsqueeze(0)
+                start_mask = (valid_range >= start_col.unsqueeze(1))  # Mask for starts
+                stop_mask = (valid_range <= stop_col.unsqueeze(1))   # Mask for stops
+                mask = start_mask & stop_mask  # Combine masks
 
-            # Apply the shifts to the output tensor
-            mask = mask.permute(0, 2, 1)
-            source = base_image[:, :, column]
-            source_unsqueezed = source.unsqueeze(2)
-            source_expanded = source_unsqueezed.expand(-1, -1, mask.size(2), -1, )  # Expand for broadcasting
-            output_target = out_tensors[:, :, lowest_min:highest_max]
-            output_target[mask] = source_expanded[mask]
+                # Apply the shifts to the output tensor
+                mask = mask.permute(0, 2, 1)
+                source = base_image[batch_start:batch_end, :, column].to(device)
+                source_unsqueezed = source.unsqueeze(2)
+                source_expanded = source_unsqueezed.expand(-1, -1, mask.size(2), -1, )  # Expand for broadcasting
+                output_target = out_tensors[batch_start:batch_end, :, lowest_min:highest_max]
+                output_target[mask] = source_expanded[mask].to(offload_device)
 
-        return out_tensors.to('cpu').unsqueeze(0)
+        return out_tensors.unsqueeze(0)
 class PairImages:
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
